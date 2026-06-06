@@ -1,8 +1,8 @@
+from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import Runnable, RunnablePassthrough
 from langchain_core.vectorstores import VectorStoreRetriever
-from langchain_ollama import ChatOllama
 
 _RAG_PROMPT_TEMPLATE: str = """\
 You are a helpful assistant. Use the following pieces of retrieved context to answer the question.
@@ -22,11 +22,9 @@ def _format_docs(docs: list) -> str:
 
 def build_rag_chain(
     retriever: VectorStoreRetriever,
-    model: str,
-    temperature: float = 0.0,
+    llm: BaseChatModel,
     prompt_template: str = _RAG_PROMPT_TEMPLATE,
 ) -> Runnable:
-    llm = ChatOllama(model=model, temperature=temperature)
     prompt = ChatPromptTemplate.from_template(prompt_template)
 
     chain = (
