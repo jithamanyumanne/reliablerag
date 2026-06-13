@@ -15,7 +15,8 @@ _PROVIDERS: dict[str, dict[str, tuple[str, str]]] = {
 }
 
 
-def _resolve(provider: str, kind: str):
+def _resolve_class(provider: str, kind: str):
+    """Dynamically import and return the class for the given provider and kind (e.g. 'embeddings', 'llm')."""
     if provider not in _PROVIDERS:
         raise ValueError(f"Unsupported provider: {provider!r}. Supported: {list(_PROVIDERS)}")
     module_name, class_name = _PROVIDERS[provider][kind]
@@ -24,8 +25,8 @@ def _resolve(provider: str, kind: str):
 
 
 def create_embeddings(provider: str, model: str, **kwargs) -> Embeddings:
-    return _resolve(provider, "embeddings")(model=model, **kwargs)
+    return _resolve_class(provider, "embeddings")(model=model, **kwargs)
 
 
 def create_llm(provider: str, model: str, **kwargs) -> BaseChatModel:
-    return _resolve(provider, "llm")(model=model, **kwargs)
+    return _resolve_class(provider, "llm")(model=model, **kwargs)
