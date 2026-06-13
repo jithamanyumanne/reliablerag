@@ -1,7 +1,7 @@
 import os
 import sys
 
-_KEYS = ("PROVIDER", "EMBEDDING_MODEL", "LLM_MODEL", "CHROMA_PERSIST_DIR", "HF_TOKEN")
+_KEYS = ("PROVIDER", "EMBEDDING_MODEL", "GENERATOR_MODEL", "JUDGE_MODEL", "CHROMA_PERSIST_DIR", "HF_TOKEN")
 
 
 def load_secrets() -> None:
