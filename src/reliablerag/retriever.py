@@ -1,10 +1,14 @@
 import os
 
 from langchain_chroma import Chroma
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.vectorstores import VectorStoreRetriever
+from pydantic import Field, PrivateAttr
+from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder
 
 
@@ -112,3 +116,67 @@ def get_reranked_retriever(
         return rerank_documents(reranker, query, base.invoke(query), top_n=top_n)
 
     return RunnableLambda(_retrieve_and_rerank)
+
+
+def _tokenize(text: str) -> list[str]:
+    return text.lower().split()
+
+
+class BM25Retriever(BaseRetriever):
+    """Keyword retriever backed by rank-bm25 (BM25Okapi)."""
+
+    documents: list[Document] = Field(repr=False)
+    k: int = 4
+    _bm25: BM25Okapi = PrivateAttr()
+
+    def model_post_init(self, __context) -> None:
+        corpus = [_tokenize(d.page_content) for d in self.documents]
+        self._bm25 = BM25Okapi(corpus)
+
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
+        scores = self._bm25.get_scores(_tokenize(query))
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[: self.k]
+        return [self.documents[i] for i in top_indices]
+
+    @classmethod
+    def from_documents(cls, documents: list[Document], k: int = 4) -> "BM25Retriever":
+        return cls(documents=documents, k=k)
+
+
+def get_hybrid_retriever(
+    vector_store: Chroma,
+    documents: list[Document],
+    top_k: int = 20,
+    rrf_k: int = 60,
+) -> Runnable:
+    """Combine dense cosine similarity (Chroma) and sparse keyword (BM25) retrieval via Reciprocal Rank Fusion.
+
+    Each retriever fetches top_k candidates. RRF score = sum(1 / (rrf_k + rank))
+    across both result lists. Top top_k unique docs by RRF score are returned.
+    """
+    cosine_retriever = vector_store.as_retriever(search_kwargs={"k": top_k})
+    bm25_retriever = BM25Retriever.from_documents(documents, k=top_k)
+
+    def _hybrid_retrieve(query: str) -> list[Document]:
+        dense_cosine_results = cosine_retriever.invoke(query)
+        sparse_bm25_results = bm25_retriever.invoke(query)
+
+        rrf_scores: dict[str, float] = {}
+        content_to_doc: dict[str, Document] = {}
+
+        for rank, doc in enumerate(dense_cosine_results):
+            key = doc.page_content
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+            content_to_doc[key] = doc
+
+        for rank, doc in enumerate(sparse_bm25_results):
+            key = doc.page_content
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+            content_to_doc[key] = doc
+
+        ranked = sorted(rrf_scores.keys(), key=lambda k: rrf_scores[k], reverse=True)
+        return [content_to_doc[k] for k in ranked[:top_k]]
+
+    return RunnableLambda(_hybrid_retrieve)

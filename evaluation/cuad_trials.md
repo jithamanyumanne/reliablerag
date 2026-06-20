@@ -112,31 +112,48 @@
 
 ---
 
+### Experiment G — Hybrid retrieval (BM25 + dense cosine, RRF fusion)
+**Reason:** Completeness gap diagnosis from Exp E — dense retrieval misses clauses with vocabulary different from the query. BM25 exact-term matching should recover those misses.  
+**Change:** Added custom `BM25Retriever` (rank-bm25) alongside Chroma cosine retrieval. Combined via Reciprocal Rank Fusion (`rrf_k=60`, equal 0.5/0.5 weights). No change to chunk size (500/50) to isolate the retrieval change.  
+**Full config:** embedder=`nomic-embed-text-v2-moe`, judge=`llama3.1:8b-instruct-q4_K_M`, similarity=cosine+BM25 RRF, chunk_size=500, overlap=50, top_k=20, N=20, n_runs=3
+
+| Metric | Ours | Ref (GPT-4) | vs E baseline |
+|---|---|---|---|
+| Relevance | 0.112 | 0.069 | −0.061 |
+| Utilization | 0.086 | 0.042 | −0.011 |
+| Completeness | **0.590** | 0.717 | **+0.026** |
+| Adherence | 30% (6/20) | 90% | −25pp |
+
+**Verdict:** Completeness improved (+0.026, right direction). However relevance dropped sharply (0.173 → 0.112, −0.061) and adherence collapsed from 55% → 30% — BM25 injected noisier chunks (legal contracts repeat common terms like "party", "agreement", "shall" across irrelevant clauses, giving BM25 many false positives) that diluted the retrieved set and confused the generator into hedging. Equal RRF weights (0.5/0.5) give too much influence to BM25. Next step: reduce BM25 weight.
+
+---
+
 ## Summary Table
 
 All metrics are **averages across N=20 samples** with fixed evaluator. Ref metrics come from GPT-4 annotations in the RAGBench dataset and are fixed per sample.
 
-| Exp | Embedder | Judge | Similarity | chunk/overlap | top_k | N | Our Rel. | Ref Rel. | Our Util. | Ref Util. | Our Comp. | Ref Comp. | Our Adh. | Ref Adh. | Notes |
+| Exp | Embedder | Judge | Retrieval | chunk/overlap | top_k | N | Our Rel. | Ref Rel. | Our Util. | Ref Util. | Our Comp. | Ref Comp. | Our Adh. | Ref Adh. | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | **E (baseline)** | nomic-embed-text-v2-moe | llama3.1:8b-q4_K_M | cosine | 500/50 | 20 | 20 | **0.173** | 0.069 | **0.097** | 0.042 | 0.564 | 0.717 | **55%** | 90% | Best overall |
 | F1 | nomic-embed-text-v2-moe | llama3.1:8b-q4_K_M | cosine | 1500/200 | 20 | 20 | 0.071 | 0.069 | 0.041 | 0.042 | **0.592** | 0.717 | 10% | 90% | Best comp, adherence collapses |
 | F2 | nomic-embed-text-v2-moe | llama3.1:8b-q4_K_M | cosine | 1000/150 | 20 | 20 | 0.090 | 0.069 | 0.043 | 0.042 | 0.446 | 0.717 | 35% | 90% | Worst overall |
+| G | nomic-embed-text-v2-moe | llama3.1:8b-q4_K_M | cosine+BM25 RRF (0.5/0.5) | 500/50 | 20 | 20 | 0.112 | 0.069 | 0.086 | 0.042 | 0.590 | 0.717 | 30% | 90% | Best completeness, adherence drops |
 
-**Current best config: E (500/50).** Proceeding to hybrid retrieval next.
+**Current best config: E (500/50) on adherence; G (hybrid) on completeness.**
 
 ---
 
 ## Open Diagnosis
 
-- **Completeness gap (0.564 vs 0.717 ref):** Dense retrieval with a single query misses clauses that use different vocabulary than the query (e.g. "escrow" vs "source code deposit"). Chunk size does not fix this.
-- **2 persistent parse errors per run:** Samples where Llama fails even after corrective retry. Marginal impact now that exclusion logic is in place.
-- **Adherence 55% vs ref 90%:** Many "I do not know" answers are legitimate retrieval failures. Generator is over-hedging when relevant context is present.
+- **Completeness gap (0.590 vs 0.717 ref):** Hybrid retrieval narrowed the gap but BM25 at equal weight introduces noise. Tuning RRF weights toward cosine dominance is the next lever.
+- **Adherence 30% with hybrid:** BM25 noise is the likely cause — generator hedges when irrelevant chunks are mixed in. Should recover with lower BM25 weight.
+- **2 persistent parse errors per run:** Marginal impact with exclusion logic in place.
 
 ---
 
 ## Next Steps (Priority Order)
 
-1. **Hybrid retrieval (BM25 + dense)** — `EnsembleRetriever`. Exact-term matching covers vocabulary-gap queries that dense retrieval misses.
-2. **Query transformation (HyDE)** — generate a hypothetical answer, embed that instead; catches paraphrase mismatches.
-3. **Reranker revisited** — re-test on top of BM25+dense candidates.
+1. **Tune RRF weights** — reduce BM25 weight (e.g. 0.3 BM25 / 0.7 cosine) to keep coverage benefit while cutting noise.
+2. **Reranker on top of hybrid** — cross-encoder to filter noise from the combined candidate pool.
+3. **Query transformation (HyDE)** — generate a hypothetical answer, embed that instead; catches paraphrase mismatches.
 4. **Stronger embedder** — `bge-large-en-v1.5` or a legal-tuned model if steps 1–3 plateau.
