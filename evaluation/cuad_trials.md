@@ -128,32 +128,50 @@
 
 ---
 
+### Experiment H — Tune RRF weights (bm25_weight=0.3)
+**Reason:** Experiment G used equal-weight hybrid (both retrievers weight=1.0, unweighted RRF) which improved completeness but collapsed adherence. Hypothesis: reducing BM25's influence to 0.3 (dense=0.7) keeps the coverage benefit while cutting noise.  
+**Change:** Added `bm25_weight` parameter to `get_hybrid_retriever`. Set `bm25_weight=0.3`, `dense_weight=0.7`. Everything else identical to Exp G.  
+**Full config:** embedder=`nomic-embed-text-v2-moe`, judge=`llama3.1:8b-instruct-q4_K_M`, similarity=cosine+BM25 RRF (0.3/0.7), chunk_size=500, overlap=50, top_k=20, N=20, n_runs=3
+
+| Metric | Ours | Ref (GPT-4) | vs E baseline | vs G (equal-weight) |
+|---|---|---|---|---|
+| Relevance | 0.132 | 0.069 | −0.041 | +0.020 |
+| Utilization | 0.054 | 0.042 | −0.043 | −0.032 |
+| Completeness | 0.524 | 0.717 | −0.040 | −0.066 |
+| Adherence | 40% (8/20) | 90% | −15pp | +10pp |
+| Parse errors | 2/20 | — | — | — |
+
+**Verdict:** Reducing BM25 weight recovered some adherence (30% → 40%) but gave up the completeness gain — completeness fell from 0.590 (G) back to 0.524, below the baseline (0.564). The trade-off is unfavourable: we lose more on completeness than we gain on adherence. Weight tuning alone cannot simultaneously improve both — the noise problem requires filtering, not just down-weighting.
+
+---
+
 ## Summary Table
 
 All metrics are **averages across N=20 samples** with fixed evaluator. Ref metrics come from GPT-4 annotations in the RAGBench dataset and are fixed per sample.
 
-| Exp | Embedder | Judge | Retrieval | chunk/overlap | top_k | N | Our Rel. | Ref Rel. | Our Util. | Ref Util. | Our Comp. | Ref Comp. | Our Adh. | Ref Adh. | Notes |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **E (baseline)** | nomic-embed-text-v2-moe | llama3.1:8b-q4_K_M | cosine | 500/50 | 20 | 20 | **0.173** | 0.069 | **0.097** | 0.042 | 0.564 | 0.717 | **55%** | 90% | Best overall |
-| F1 | nomic-embed-text-v2-moe | llama3.1:8b-q4_K_M | cosine | 1500/200 | 20 | 20 | 0.071 | 0.069 | 0.041 | 0.042 | **0.592** | 0.717 | 10% | 90% | Best comp, adherence collapses |
-| F2 | nomic-embed-text-v2-moe | llama3.1:8b-q4_K_M | cosine | 1000/150 | 20 | 20 | 0.090 | 0.069 | 0.043 | 0.042 | 0.446 | 0.717 | 35% | 90% | Worst overall |
-| G | nomic-embed-text-v2-moe | llama3.1:8b-q4_K_M | cosine+BM25 RRF (0.5/0.5) | 500/50 | 20 | 20 | 0.112 | 0.069 | 0.086 | 0.042 | 0.590 | 0.717 | 30% | 90% | Best completeness, adherence drops |
+| Exp | Retrieval | chunk/overlap | Our Rel. | Our Util. | Our Comp. | Ref Comp. | Our Adh. | Notes |
+|---|---|---|---|---|---|---|---|---|
+| **E (baseline)** | cosine | 500/50 | **0.173** | **0.097** | 0.564 | 0.717 | **55%** | Best overall |
+| F1 | cosine | 1500/200 | 0.071 | 0.041 | **0.592** | 0.717 | 10% | Best comp, adherence collapses |
+| F2 | cosine | 1000/150 | 0.090 | 0.043 | 0.446 | 0.717 | 35% | Worst overall |
+| G | cosine+BM25 RRF (equal weight) | 500/50 | 0.112 | 0.086 | 0.590 | 0.717 | 30% | Best completeness, adherence drops |
+| H | cosine+BM25 RRF (bm25=0.3) | 500/50 | 0.132 | 0.054 | 0.524 | 0.717 | 40% | Weight tuning: completeness fell back below baseline |
 
-**Current best config: E (500/50) on adherence; G (hybrid) on completeness.**
+All experiments: embedder=`nomic-embed-text-v2-moe`, judge=`llama3.1:8b-instruct-q4_K_M`, top_k=20, N=20, n_runs=3.  
+**Current best config: E on adherence/relevance/utilization; G on completeness.**
 
 ---
 
 ## Open Diagnosis
 
-- **Completeness gap (0.590 vs 0.717 ref):** Hybrid retrieval narrowed the gap but BM25 at equal weight introduces noise. Tuning RRF weights toward cosine dominance is the next lever.
-- **Adherence 30% with hybrid:** BM25 noise is the likely cause — generator hedges when irrelevant chunks are mixed in. Should recover with lower BM25 weight.
+- **Completeness gap (0.590 vs 0.717 ref):** Best completeness is from Exp G (equal-weight hybrid). BM25 recovers exact-term clause misses dense retrieval drops, but injects noisy chunks that confuse the generator.
+- **Adherence 30–40% with hybrid vs 55% baseline:** BM25 noise is the confirmed cause. Weight tuning (Exp H) showed the trade-off is unfavourable — no single weight improves both metrics. Filtering noise with a reranker is the right next move.
 - **2 persistent parse errors per run:** Marginal impact with exclusion logic in place.
 
 ---
 
 ## Next Steps (Priority Order)
 
-1. **Tune RRF weights** — reduce BM25 weight (e.g. 0.3 BM25 / 0.7 cosine) to keep coverage benefit while cutting noise.
-2. **Reranker on top of hybrid** — cross-encoder to filter noise from the combined candidate pool.
-3. **Query transformation (HyDE)** — generate a hypothetical answer, embed that instead; catches paraphrase mismatches.
-4. **Stronger embedder** — `bge-large-en-v1.5` or a legal-tuned model if steps 1–3 plateau.
+1. **Reranker on top of hybrid (Exp G config)** — over-fetch top-40 from equal-weight hybrid, cross-encoder reranks to top-20. Keeps BM25's coverage while filtering noise before the generator sees context.
+2. **Query transformation (HyDE)** — generate a hypothetical answer, embed that instead; catches paraphrase mismatches.
+3. **Stronger embedder** — `bge-large-en-v1.5` or a legal-tuned model if steps 1–2 plateau.

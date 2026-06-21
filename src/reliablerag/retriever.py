@@ -150,12 +150,16 @@ def get_hybrid_retriever(
     documents: list[Document],
     top_k: int = 20,
     rrf_k: int = 60,
+    bm25_weight: float = 0.5,
 ) -> Runnable:
     """Combine dense cosine similarity (Chroma) and sparse keyword (BM25) retrieval via Reciprocal Rank Fusion.
 
-    Each retriever fetches top_k candidates. RRF score = sum(1 / (rrf_k + rank))
-    across both result lists. Top top_k unique docs by RRF score are returned.
+    Each retriever fetches top_k candidates. Weighted RRF score:
+      score += dense_weight / (rrf_k + rank + 1)  for cosine results
+      score += bm25_weight  / (rrf_k + rank + 1)  for BM25 results
+    where dense_weight = 1 - bm25_weight. Top top_k unique docs by score are returned.
     """
+    dense_weight = 1.0 - bm25_weight
     cosine_retriever = vector_store.as_retriever(search_kwargs={"k": top_k})
     bm25_retriever = BM25Retriever.from_documents(documents, k=top_k)
 
@@ -168,12 +172,12 @@ def get_hybrid_retriever(
 
         for rank, doc in enumerate(dense_cosine_results):
             key = doc.page_content
-            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + dense_weight / (rrf_k + rank + 1)
             content_to_doc[key] = doc
 
         for rank, doc in enumerate(sparse_bm25_results):
             key = doc.page_content
-            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + bm25_weight / (rrf_k + rank + 1)
             content_to_doc[key] = doc
 
         ranked = sorted(rrf_scores.keys(), key=lambda k: rrf_scores[k], reverse=True)
