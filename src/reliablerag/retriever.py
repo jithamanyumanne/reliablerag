@@ -145,6 +145,28 @@ class BM25Retriever(BaseRetriever):
         return cls(documents=documents, k=k)
 
 
+def get_hybrid_reranked_retriever(
+    vector_store: Chroma,
+    documents: list[Document],
+    reranker: CrossEncoder,
+    fetch_k: int = 40,
+    top_n: int = 20,
+    rrf_k: int = 60,
+    bm25_weight: float = 0.5,
+) -> Runnable:
+    """Equal-weight hybrid (BM25 + cosine, RRF) over-fetches fetch_k candidates,
+    then a cross-encoder reranks to top_n.  Keeps BM25's recall while filtering noise."""
+    hybrid = get_hybrid_retriever(
+        vector_store, documents, top_k=fetch_k, rrf_k=rrf_k, bm25_weight=bm25_weight
+    )
+
+    def _retrieve_and_rerank(query: str) -> list[Document]:
+        candidates = hybrid.invoke(query)
+        return rerank_documents(reranker, query, candidates, top_n=top_n)
+
+    return RunnableLambda(_retrieve_and_rerank)
+
+
 def get_hybrid_retriever(
     vector_store: Chroma,
     documents: list[Document],

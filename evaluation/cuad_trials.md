@@ -145,6 +145,23 @@
 
 ---
 
+### Experiment I — Reranker on top of equal-weight hybrid
+**Reason:** Experiment H showed weight tuning can't simultaneously recover completeness and adherence — the BM25 noise problem requires filtering, not down-weighting. A cross-encoder reranker applied after retrieval should keep BM25's recall while cutting irrelevant chunks before the generator sees them.  
+**Change:** Equal-weight hybrid (bm25_weight=0.5) over-fetches `fetch_k=40` candidates via RRF, then `BAAI/bge-reranker-base` cross-encoder reranks to `top_n=20`. New `get_hybrid_reranked_retriever` function in `retriever.py`. No change to chunking (500/50).  
+**Full config:** embedder=`nomic-embed-text-v2-moe`, judge=`llama3.1:8b-instruct-q4_K_M`, similarity=cosine+BM25 RRF (equal weight) + cross-encoder rerank, chunk_size=500, overlap=50, fetch_k=40, top_n=20, N=20, n_runs=3
+
+| Metric | Ours | Ref (GPT-4) | vs E baseline | vs G (equal hybrid) |
+|---|---|---|---|---|
+| Relevance | 0.135 | 0.069 | −0.038 | +0.023 |
+| Utilization | 0.091 | 0.042 | −0.006 | +0.005 |
+| Completeness | 0.479 | 0.717 | −0.085 | −0.111 |
+| Adherence | 20% (4/20) | 90% | −35pp | −10pp |
+| Parse errors | 4/20 | — | — | — |
+
+**Verdict:** Worst adherence across all experiments (20%). The cross-encoder (`bge-reranker-base`) is a general-domain model — in legal contracts it promotes chunks that match query keywords ("source code", "license") but don't contain the actual responsive clause. This re-ordering actively removes the grounding chunks BM25 recovered, so the generator hedges even more. Completeness also dropped to 0.479, the lowest of any hybrid config. Reranking with a general-domain cross-encoder is net negative on legal text. **Dense-only baseline (Exp E) remains the best all-round config.**
+
+---
+
 ## Summary Table
 
 All metrics are **averages across N=20 samples** with fixed evaluator. Ref metrics come from GPT-4 annotations in the RAGBench dataset and are fixed per sample.
@@ -156,22 +173,26 @@ All metrics are **averages across N=20 samples** with fixed evaluator. Ref metri
 | F2 | cosine | 1000/150 | 0.090 | 0.043 | 0.446 | 0.717 | 35% | Worst overall |
 | G | cosine+BM25 RRF (equal weight) | 500/50 | 0.112 | 0.086 | 0.590 | 0.717 | 30% | Best completeness, adherence drops |
 | H | cosine+BM25 RRF (bm25=0.3) | 500/50 | 0.132 | 0.054 | 0.524 | 0.717 | 40% | Weight tuning: completeness fell back below baseline |
+| I | cosine+BM25 RRF (equal) + cross-encoder rerank | 500/50 | 0.135 | 0.091 | 0.479 | 0.717 | 20% | Worst adherence; reranker demotes grounding chunks |
 
 All experiments: embedder=`nomic-embed-text-v2-moe`, judge=`llama3.1:8b-instruct-q4_K_M`, top_k=20, N=20, n_runs=3.  
-**Current best config: E on adherence/relevance/utilization; G on completeness.**
+**Current best config: E (dense-only) on all metrics. No hybrid variant has improved on it holistically.**
 
 ---
 
 ## Open Diagnosis
 
-- **Completeness gap (0.590 vs 0.717 ref):** Best completeness is from Exp G (equal-weight hybrid). BM25 recovers exact-term clause misses dense retrieval drops, but injects noisy chunks that confuse the generator.
-- **Adherence 30–40% with hybrid vs 55% baseline:** BM25 noise is the confirmed cause. Weight tuning (Exp H) showed the trade-off is unfavourable — no single weight improves both metrics. Filtering noise with a reranker is the right next move.
-- **2 persistent parse errors per run:** Marginal impact with exclusion logic in place.
+- **Completeness gap (0.564 vs 0.717 ref):** Dense-only baseline (Exp E) is the best all-round config. BM25 hybrid improved completeness to 0.590 (Exp G) but at a 25pp adherence cost — no weight or reranking variant has recovered both simultaneously.
+- **Hybrid retrieval is net negative so far:** BM25 injects legal boilerplate false-positives ("party", "agreement", "shall") that dense retrieval correctly ranks low. General-domain cross-encoder reranking (Exp I) made this worse, not better — it re-promotes keyword-matching but non-grounding chunks.
+- **Adherence is the binding constraint:** Generator hedges ("I do not have enough information") whenever noisy or off-topic chunks dilute the context window. Dense-only keeps this at 55%; any hybrid drops it to 20–40%.
+- **4 persistent parse errors per run (samples 2, 5, 12, 16):** Zeroing these out may be inflating apparent scores on "good" runs. Likely a judge prompt interaction with specific sample content.
+- **Root cause of completeness gap likely vocabulary mismatch:** Dense retrieval misses clauses that use different legal terminology than the query. BM25 is the right idea but wrong execution on this domain.
 
 ---
 
 ## Next Steps (Priority Order)
 
-1. **Reranker on top of hybrid (Exp G config)** — over-fetch top-40 from equal-weight hybrid, cross-encoder reranks to top-20. Keeps BM25's coverage while filtering noise before the generator sees context.
-2. **Query transformation (HyDE)** — generate a hypothetical answer, embed that instead; catches paraphrase mismatches.
-3. **Stronger embedder** — `bge-large-en-v1.5` or a legal-tuned model if steps 1–2 plateau.
+1. **Query expansion / HyDE** — generate a hypothetical answer clause, embed that alongside the original query, fuse results. Catches paraphrase mismatches without BM25 noise. Doesn't require a domain-specific model.
+2. **Legal-domain embedder** — swap `nomic-embed-text-v2-moe` for a legal-tuned model (e.g. `legal-bert`, `inlegal-bert`, or `bge-large-en-v1.5` fine-tuned on contracts). Vocabulary mismatch at the embedding level is likely the root cause; fixing it there would be cleaner than patching at retrieval.
+3. **Sentence-level chunking** — CUAD clauses are typically one sentence. RecursiveCharacterTextSplitter at 500 chars splits mid-clause; a sentence-aware splitter (e.g. spaCy) might improve both precision and recall without changing retrieval strategy.
+4. **Diagnose the 4 persistent parse errors** — understand whether samples 2, 5, 12, 16 have structural properties (very short docs, atypical formatting) that break the judge prompt, and fix or exclude them from the evaluation set.
