@@ -4,6 +4,8 @@ from langchain_chroma import Chroma
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_core.vectorstores import VectorStoreRetriever
@@ -165,6 +167,33 @@ def get_hybrid_reranked_retriever(
         return rerank_documents(reranker, query, candidates, top_n=top_n)
 
     return RunnableLambda(_retrieve_and_rerank)
+
+
+_HYDE_PROMPT = (
+    "You are a contract analyst. Write a short hypothetical contract clause (2-4 sentences) "
+    "that directly answers the following question. Write only the clause text, no preamble.\n\n"
+    "Question: {question}"
+)
+
+
+def get_hyde_retriever(
+    vector_store: Chroma,
+    embeddings: Embeddings,
+    llm: BaseChatModel,
+    top_k: int = 20,
+) -> Runnable:
+    """HyDE retriever: generates a hypothetical answer clause, embeds it, then retrieves by vector.
+
+    Addresses vocabulary mismatch — the hypothetical uses contract terminology that better
+    matches how clauses are phrased in the document, rather than matching the query wording.
+    """
+    def _hyde_retrieve(query: str) -> list[Document]:
+        prompt = _HYDE_PROMPT.format(question=query)
+        hypothetical = str(llm.invoke([HumanMessage(content=prompt)]).content)
+        hyp_vector = embeddings.embed_query(hypothetical)
+        return vector_store.similarity_search_by_vector(hyp_vector, k=top_k)
+
+    return RunnableLambda(_hyde_retrieve)
 
 
 def get_hybrid_retriever(

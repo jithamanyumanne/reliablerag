@@ -49,10 +49,11 @@ Start the daemon:
 ollama serve
 ```
 
-Pull the required models (update model names to match your `.env`):
+Pull the required models:
 ```bash
 ollama pull nomic-embed-text-v2-moe:latest
 ollama pull gemma4:12b-it-q4_K_M
+ollama pull llama3.1:8b-instruct-q4_K_M
 ```
 
 ---
@@ -78,16 +79,20 @@ Edit `.env` with your values:
 | Variable | Description |
 |---|---|
 | `PROVIDER` | Provider to use. Currently supported: `ollama` |
-| `EMBEDDING_MODEL` | Embedding model name (format depends on provider) |
-| `LLM_MODEL` | LLM model name (format depends on provider) |
+| `EMBEDDING_MODEL` | Embedding model name |
+| `GENERATOR_MODEL` | LLM used to generate answers |
+| `JUDGE_MODEL` | LLM used by the TRACe evaluator (smaller/faster is fine) |
 | `CHROMA_PERSIST_DIR` | **Absolute path** to ChromaDB storage directory |
+| `HF_TOKEN` | HuggingFace token (required to download the ragbench dataset) |
 
 Example:
 ```
 PROVIDER=ollama
 EMBEDDING_MODEL=nomic-embed-text-v2-moe:latest
-LLM_MODEL=gemma4:12b-it-q4_K_M
+GENERATOR_MODEL=gemma4:12b-it-q4_K_M
+JUDGE_MODEL=llama3.1:8b-instruct-q4_K_M
 CHROMA_PERSIST_DIR=/absolute/path/to/reliablerag/data/chroma_db
+HF_TOKEN=hf_...
 ```
 
 > `CHROMA_PERSIST_DIR` must be an absolute path. Relative paths resolve against the notebook's working directory which varies across environments.

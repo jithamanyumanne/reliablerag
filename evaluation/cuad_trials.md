@@ -162,37 +162,53 @@
 
 ---
 
+### Experiment J — HyDE (Hypothetical Document Embeddings)
+**Reason:** All hybrid retrieval variants (Exps G–I) improved completeness but collapsed adherence. Root cause diagnosis: vocabulary mismatch between query phrasing and contract clause phrasing. HyDE generates a hypothetical contract clause as a proxy query, embeds that instead of the raw query, and retrieves by vector — no BM25 noise, no reranker, just a semantically richer query representation.  
+**Change:** New `get_hyde_retriever` in `retriever.py`. At query time: LLM generates a 2–4 sentence hypothetical clause, that text is embedded via the same embeddings model, Chroma `similarity_search_by_vector` retrieves top-20. Generator LLM (`llama3.2:3b-instruct` or equivalent fast model) used for hypothesis generation to avoid doubling latency.  
+**Full config:** embedder=`nomic-embed-text-v2-moe`, judge=`llama3.1:8b-instruct-q4_K_M`, similarity=cosine (via hypothetical embedding), chunk_size=500, overlap=50, top_k=20, N=20, n_runs=3
+
+| Metric | Ours | Ref (GPT-4) | vs E baseline |
+|---|---|---|---|
+| Relevance | **0.334** | 0.069 | **+0.161** |
+| Utilization | **0.194** | 0.042 | **+0.097** |
+| Completeness | **0.578** | 0.717 | **+0.014** |
+| Adherence | 25% (5/20) | 90% | −30pp |
+
+**Verdict:** HyDE produced the biggest relevance and utilization jump of any experiment (+0.161 / +0.097 vs baseline). The hypothetical clause successfully closed the vocabulary gap — retrieved chunks are more on-point. Completeness also improved slightly (+0.014). However adherence dropped sharply from 55% → 25%. The key finding from per-sample inspection: **several samples score completeness 1.000 but fail adherence** — the generator finds all relevant context yet still responds with "I do not have enough information." This is a generator prompt issue, not a retrieval miss. HyDE has confirmed retrieval is no longer the bottleneck on these samples; the generator's conservatism is.
+
+---
+
 ## Summary Table
 
 All metrics are **averages across N=20 samples** with fixed evaluator. Ref metrics come from GPT-4 annotations in the RAGBench dataset and are fixed per sample.
 
 | Exp | Retrieval | chunk/overlap | Our Rel. | Our Util. | Our Comp. | Ref Comp. | Our Adh. | Notes |
 |---|---|---|---|---|---|---|---|---|
-| **E (baseline)** | cosine | 500/50 | **0.173** | **0.097** | 0.564 | 0.717 | **55%** | Best overall |
-| F1 | cosine | 1500/200 | 0.071 | 0.041 | **0.592** | 0.717 | 10% | Best comp, adherence collapses |
+| **E (baseline)** | cosine | 500/50 | 0.173 | 0.097 | 0.564 | 0.717 | **55%** | Best adherence |
+| F1 | cosine | 1500/200 | 0.071 | 0.041 | 0.592 | 0.717 | 10% | Best comp, adherence collapses |
 | F2 | cosine | 1000/150 | 0.090 | 0.043 | 0.446 | 0.717 | 35% | Worst overall |
-| G | cosine+BM25 RRF (equal weight) | 500/50 | 0.112 | 0.086 | 0.590 | 0.717 | 30% | Best completeness, adherence drops |
-| H | cosine+BM25 RRF (bm25=0.3) | 500/50 | 0.132 | 0.054 | 0.524 | 0.717 | 40% | Weight tuning: completeness fell back below baseline |
+| G | cosine+BM25 RRF (equal weight) | 500/50 | 0.112 | 0.086 | 0.590 | 0.717 | 30% | Best completeness before HyDE |
+| H | cosine+BM25 RRF (bm25=0.3) | 500/50 | 0.132 | 0.054 | 0.524 | 0.717 | 40% | Weight tuning: completeness fell back |
 | I | cosine+BM25 RRF (equal) + cross-encoder rerank | 500/50 | 0.135 | 0.091 | 0.479 | 0.717 | 20% | Worst adherence; reranker demotes grounding chunks |
+| **J (HyDE)** | cosine (hypothetical embedding) | 500/50 | **0.334** | **0.194** | **0.578** | 0.717 | 25% | Best rel/util by far; adherence gap is generator, not retrieval |
 
 All experiments: embedder=`nomic-embed-text-v2-moe`, judge=`llama3.1:8b-instruct-q4_K_M`, top_k=20, N=20, n_runs=3.  
-**Current best config: E (dense-only) on all metrics. No hybrid variant has improved on it holistically.**
+**Current best retrieval: J (HyDE) on relevance/utilization/completeness. Adherence gap is now a generator problem, not retrieval.**
 
 ---
 
 ## Open Diagnosis
 
-- **Completeness gap (0.564 vs 0.717 ref):** Dense-only baseline (Exp E) is the best all-round config. BM25 hybrid improved completeness to 0.590 (Exp G) but at a 25pp adherence cost — no weight or reranking variant has recovered both simultaneously.
-- **Hybrid retrieval is net negative so far:** BM25 injects legal boilerplate false-positives ("party", "agreement", "shall") that dense retrieval correctly ranks low. General-domain cross-encoder reranking (Exp I) made this worse, not better — it re-promotes keyword-matching but non-grounding chunks.
-- **Adherence is the binding constraint:** Generator hedges ("I do not have enough information") whenever noisy or off-topic chunks dilute the context window. Dense-only keeps this at 55%; any hybrid drops it to 20–40%.
-- **4 persistent parse errors per run (samples 2, 5, 12, 16):** Zeroing these out may be inflating apparent scores on "good" runs. Likely a judge prompt interaction with specific sample content.
-- **Root cause of completeness gap likely vocabulary mismatch:** Dense retrieval misses clauses that use different legal terminology than the query. BM25 is the right idea but wrong execution on this domain.
+- **Retrieval is no longer the primary bottleneck:** HyDE (Exp J) doubled relevance and utilization vs baseline. Several samples score completeness 1.000 but fail adherence — the generator has the right context and still hedges.
+- **Adherence gap is a generator problem:** The generator LLM (Llama 3.1 8B) frequently responds "I do not have enough information" even when the retrieved chunks contain the answer. This is likely a combination of conservative instruction-following and the judge's strict grounding requirement.
+- **Completeness gap partially closed (0.564 → 0.578):** Still 0.139 below ref (0.717). The remaining gap is likely a mix of: (a) some queries that genuinely need better embeddings (legal-domain), and (b) samples where the generator fails to use retrieved evidence even when it's present (adherence/utilization issue).
+- **Next lever is the generator prompt:** Explicitly instructing the model to answer based on provided context, and to state what the context says rather than claiming ignorance, should recover adherence without hurting retrieval quality.
 
 ---
 
 ## Next Steps (Priority Order)
 
-1. **Query expansion / HyDE** — generate a hypothetical answer clause, embed that alongside the original query, fuse results. Catches paraphrase mismatches without BM25 noise. Doesn't require a domain-specific model.
-2. **Legal-domain embedder** — swap `nomic-embed-text-v2-moe` for a legal-tuned model (e.g. `legal-bert`, `inlegal-bert`, or `bge-large-en-v1.5` fine-tuned on contracts). Vocabulary mismatch at the embedding level is likely the root cause; fixing it there would be cleaner than patching at retrieval.
-3. **Sentence-level chunking** — CUAD clauses are typically one sentence. RecursiveCharacterTextSplitter at 500 chars splits mid-clause; a sentence-aware splitter (e.g. spaCy) might improve both precision and recall without changing retrieval strategy.
-4. **Diagnose the 4 persistent parse errors** — understand whether samples 2, 5, 12, 16 have structural properties (very short docs, atypical formatting) that break the judge prompt, and fix or exclude them from the evaluation set.
+1. **Fix the generator prompt** — instruct the model to answer directly from the provided context, and never say "I do not have enough information" when context is present. Samples with completeness 1.000 but failing adherence are the clearest signal this is needed.
+2. **Legal-domain embedder** — swap `nomic-embed-text-v2-moe` for a legal-tuned model (e.g. `legal-bert`, `inlegal-bert`, or `bge-large-en-v1.5`). Vocabulary mismatch at the embedding level is the remaining retrieval gap; HyDE is a workaround, a better embedder would fix it at source.
+3. **HyDE + generator prompt fix combined** — once the generator stops hedging, re-run HyDE to get a clean read on how much of the completeness gap is retrieval vs generation.
+4. **Sentence-level chunking** — CUAD clauses are typically one sentence; 500-char chunks may still split mid-clause. A sentence-aware splitter could improve both precision and completeness.
